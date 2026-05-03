@@ -1,0 +1,70 @@
+name: Idealista to Qobrix monitor
+
+on:
+  schedule:
+    # Cada 5 minutos. GitHub Actions a veces se retrasa varios minutos
+    # bajo carga, pero garantiza al menos una ejecucion en ese rango.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:  # permite lanzarlo manualmente desde la UI
+
+# Para que el workflow pueda commitear de vuelta processed_ids.json
+permissions:
+  contents: write
+
+# No solapar ejecuciones: si una tarda mas de 5 min, la siguiente espera.
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4   # mata el job si supera 4 min (anti-cuelgue)
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          # Necesario para poder hacer push de processed_ids.json
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        env:
+          GMAIL_USER:           ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
+          HOSTINGER_USER:       ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PASSWORD:   ${{ secrets.HOSTINGER_PASSWORD }}
+          QOBRIX_URL:           ${{ secrets.QOBRIX_URL }}
+          QOBRIX_USER:          ${{ secrets.QOBRIX_USER }}
+          QOBRIX_KEY:           ${{ secrets.QOBRIX_KEY }}
+        run: python monitor.py
+
+      - name: Commit processed_ids.json if changed
+        run: |
+          if ! git diff --quiet processed_ids.json 2>/dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add processed_ids.json
+            git commit -m "chore: update processed_ids [skip ci]"
+            git push
+          else
+            echo "No changes in processed_ids.json"
+          fi
+
+      - name: Upload run log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log-${{ github.run_id }}
+          path: idealista_qobrix.log
+          retention-days: 7
+          if-no-files-found: ignore
