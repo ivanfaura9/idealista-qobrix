@@ -353,33 +353,37 @@ def notify_ntfy(lead, subject, opportunity_id, source_name):
         "QOBRIX_URL", "https://ifrealestate4571.eu1.qobrix.com"
     ).rstrip("/")
 
-    # Cuerpo: nombre, telefono, propiedad
-    parts = []
-    if lead.get("name"):
-        parts.append(f"{lead['name']}")
-    if lead.get("phone"):
-        parts.append(f"📞 {lead['phone']}")
-    if lead.get("email"):
-        parts.append(f"✉️ {lead['email']}")
-    # Extraer ref del subject ("ref: 1093")
-    m = re.search(r"ref[:\s]+(\d+)", subject, re.I)
+    # Extraer ref + calle/zona del subject de Idealista.
+    # Formato tipico: "Nuevo mensaje de NOMBRE sobre tu inmueble, con ref: 1093, Piso en Avenida Pallaresa"
+    ref = ""
+    calle = ""
+    m = re.search(r"ref[:\s]+(\d+)\s*,?\s*(.*)", subject, re.I)
     if m:
-        parts.append(f"🏠 Propiedad ref {m.group(1)}")
-    body = "\n".join(parts) if parts else "Lead nuevo"
+        ref = m.group(1).strip()
+        calle = re.sub(r"\s+", " ", m.group(2)).strip().rstrip(".,;: -")
 
+    # Cuerpo: solo lo esencial (calle + ref). Nombre va en el TITLE.
+    body_parts = []
+    if calle:
+        body_parts.append(f"🏠 {calle}")
+    if ref:
+        body_parts.append(f"ref {ref}")
+    body = " · ".join(body_parts) if body_parts else "Nuevo comprador interesado"
+
+    name = (lead.get("name") or "Nuevo lead").strip()
     headers = {
-        "Title": f"🔥 NUEVO LEAD COMPRADOR · {source_name}",
+        "Title": f"🔥 LEAD {source_name.upper()} · {name}",
         "Priority": "high",
         "Tags": "fire",
     }
+    # En iOS: Attach pone la imagen DENTRO de la notif (al desplegar).
+    # Icon como ICONO de la notif NO funciona en iOS por restriccion de Apple.
     if icon_url:
-        headers["Icon"] = icon_url
+        headers["Attach"] = icon_url
     if opportunity_id:
-        headers["Click"] = f"{qobrix_base}/crm/opportunities/{opportunity_id}"
-        headers["Actions"] = (
-            f"view, Abrir en Qobrix, "
-            f"{qobrix_base}/crm/opportunities/{opportunity_id}"
-        )
+        opp_url = f"{qobrix_base}/crm/opportunities/{opportunity_id}"
+        headers["Click"] = opp_url
+        headers["Actions"] = f"view, Abrir en Qobrix, {opp_url}, clear=true"
 
     try:
         r = requests.post(
