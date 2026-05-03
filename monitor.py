@@ -339,6 +339,64 @@ def create_opportunity(contact_id, description, subject):
 
 
 # ──────────────────────────────────────────────
+# NOTIFICACION PUSH ntfy.sh (logo + texto custom)
+# ──────────────────────────────────────────────
+def notify_ntfy(lead, subject, opportunity_id, source_name):
+    """Envia push enriquecido al telefono via ntfy.sh.
+    Si el secret NTFY_TOPIC no esta definido, no hace nada (silencio limpio)."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if not topic:
+        return  # ntfy desactivado
+
+    icon_url = os.environ.get("NTFY_ICON_URL", "").strip()
+    qobrix_base = os.environ.get(
+        "QOBRIX_URL", "https://ifrealestate4571.eu1.qobrix.com"
+    ).rstrip("/")
+
+    # Cuerpo: nombre, telefono, propiedad
+    parts = []
+    if lead.get("name"):
+        parts.append(f"{lead['name']}")
+    if lead.get("phone"):
+        parts.append(f"📞 {lead['phone']}")
+    if lead.get("email"):
+        parts.append(f"✉️ {lead['email']}")
+    # Extraer ref del subject ("ref: 1093")
+    m = re.search(r"ref[:\s]+(\d+)", subject, re.I)
+    if m:
+        parts.append(f"🏠 Propiedad ref {m.group(1)}")
+    body = "\n".join(parts) if parts else "Lead nuevo"
+
+    headers = {
+        "Title": f"🔥 NUEVO LEAD COMPRADOR · {source_name}",
+        "Priority": "high",
+        "Tags": "fire",
+    }
+    if icon_url:
+        headers["Icon"] = icon_url
+    if opportunity_id:
+        headers["Click"] = f"{qobrix_base}/crm/opportunities/{opportunity_id}"
+        headers["Actions"] = (
+            f"view, Abrir en Qobrix, "
+            f"{qobrix_base}/crm/opportunities/{opportunity_id}"
+        )
+
+    try:
+        r = requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=body.encode("utf-8"),
+            headers=headers,
+            timeout=10,
+        )
+        if r.status_code == 200:
+            log.info(f"  Push ntfy enviado")
+        else:
+            log.warning(f"  Push ntfy HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as exc:
+        log.warning(f"  Push ntfy fallo (no critico): {exc}")
+
+
+# ──────────────────────────────────────────────
 # PROCESAR UNA CUENTA
 # ──────────────────────────────────────────────
 def process_account(account, processed_dict):
@@ -407,7 +465,9 @@ def process_account(account, processed_dict):
                         )
 
                         if contact_id:
-                            create_opportunity(contact_id, description, subject)
+                            opp_id = create_opportunity(contact_id, description, subject)
+                            # Notif push corporativa via ntfy
+                            notify_ntfy(lead, subject, opp_id, "Idealista")
                             processed.add(f"{folder}:{eid.decode()}")
                             save_processed(processed_dict)
                         else:

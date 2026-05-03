@@ -46,6 +46,9 @@ jobs:
           QOBRIX_URL:           ${{ secrets.QOBRIX_URL }}
           QOBRIX_USER:          ${{ secrets.QOBRIX_USER }}
           QOBRIX_KEY:           ${{ secrets.QOBRIX_KEY }}
+          OWNER_USER_ID:        ${{ secrets.OWNER_USER_ID }}
+          NTFY_TOPIC:           ${{ secrets.NTFY_TOPIC }}
+          NTFY_ICON_URL:        ${{ secrets.NTFY_ICON_URL }}
         run: python monitor.py
 
       - name: Commit processed_ids.json if changed
