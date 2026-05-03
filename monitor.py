@@ -447,9 +447,10 @@ def notify_webpush(lead, subject, opportunity_id, source_name):
     body = " · ".join(body_parts) if body_parts else "Nuevo comprador interesado"
     name = (lead.get("name") or "Nuevo lead").strip()
 
+    # Sin "title": todo en el body para que iOS NO añada el "from <PWA name>" como subtitle.
+    full_body = f"🔥 LEAD {source_name.upper()} · {name}\n{body}"
     payload = json.dumps({
-        "title": f"🔥 LEAD {source_name.upper()} · {name}",
-        "body":  body,
+        "body":  full_body,
         "url":   f"{qobrix_base}/crm/opportunities/{opportunity_id}" if opportunity_id else qobrix_base,
         "tag":   f"lead-{opportunity_id or 'new'}",
     })
