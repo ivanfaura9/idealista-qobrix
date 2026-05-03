@@ -49,6 +49,9 @@ jobs:
           OWNER_USER_ID:        ${{ secrets.OWNER_USER_ID }}
           NTFY_TOPIC:           ${{ secrets.NTFY_TOPIC }}
           NTFY_ICON_URL:        ${{ secrets.NTFY_ICON_URL }}
+          VAPID_PRIVATE_KEY:    ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_EMAIL:          ${{ secrets.VAPID_EMAIL }}
+          WEBPUSH_SUBSCRIPTIONS: ${{ secrets.WEBPUSH_SUBSCRIPTIONS }}
         run: python monitor.py
 
       - name: Commit processed_ids.json if changed

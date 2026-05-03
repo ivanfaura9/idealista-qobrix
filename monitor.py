@@ -401,6 +401,79 @@ def notify_ntfy(lead, subject, opportunity_id, source_name):
 
 
 # ──────────────────────────────────────────────
+# NOTIFICACION WEB PUSH (PWA propia con logo IF)
+# ──────────────────────────────────────────────
+def notify_webpush(lead, subject, opportunity_id, source_name):
+    """Envia push a TODAS las suscripciones registradas en WEBPUSH_SUBSCRIPTIONS.
+    Cada suscripcion es un dict {endpoint, keys: {p256dh, auth}}.
+    Si no hay nada configurado o falla la libreria, silencio limpio."""
+    subs_json = os.environ.get("WEBPUSH_SUBSCRIPTIONS", "").strip()
+    private_key = os.environ.get("VAPID_PRIVATE_KEY", "").strip()
+    if not subs_json or not private_key:
+        return
+
+    try:
+        from pywebpush import webpush, WebPushException
+    except ImportError:
+        log.warning("  pywebpush no instalado; salto Web Push")
+        return
+
+    try:
+        subscriptions = json.loads(subs_json)
+        if isinstance(subscriptions, dict):
+            subscriptions = [subscriptions]
+    except json.JSONDecodeError as exc:
+        log.error(f"  WEBPUSH_SUBSCRIPTIONS invalido: {exc}")
+        return
+
+    qobrix_base = os.environ.get(
+        "QOBRIX_URL", "https://ifrealestate4571.eu1.qobrix.com"
+    ).rstrip("/")
+    vapid_email = os.environ.get("VAPID_EMAIL", "ivanfaurar@gmail.com")
+
+    # Construir payload del push
+    ref = ""
+    calle = ""
+    m = re.search(r"ref[:\s]+(\d+)\s*,?\s*(.*)", subject, re.I)
+    if m:
+        ref = m.group(1).strip()
+        calle = re.sub(r"\s+", " ", m.group(2)).strip().rstrip(".,;: -")
+
+    body_parts = []
+    if calle:
+        body_parts.append(f"🏠 {calle}")
+    if ref:
+        body_parts.append(f"ref {ref}")
+    body = " · ".join(body_parts) if body_parts else "Nuevo comprador interesado"
+    name = (lead.get("name") or "Nuevo lead").strip()
+
+    payload = json.dumps({
+        "title": f"🔥 LEAD {source_name.upper()} · {name}",
+        "body":  body,
+        "url":   f"{qobrix_base}/crm/opportunities/{opportunity_id}" if opportunity_id else qobrix_base,
+        "tag":   f"lead-{opportunity_id or 'new'}",
+    })
+
+    sent = 0
+    for sub in subscriptions:
+        try:
+            webpush(
+                subscription_info=sub,
+                data=payload,
+                vapid_private_key=private_key,
+                vapid_claims={"sub": f"mailto:{vapid_email}"},
+                ttl=86400,  # 24h de validez maxima
+            )
+            sent += 1
+        except WebPushException as exc:
+            log.warning(f"  Push Web a sub fallo: {exc}")
+        except Exception as exc:
+            log.warning(f"  Push Web error inesperado: {exc}")
+
+    log.info(f"  Push Web enviado a {sent}/{len(subscriptions)} suscripcion(es)")
+
+
+# ──────────────────────────────────────────────
 # PROCESAR UNA CUENTA
 # ──────────────────────────────────────────────
 def process_account(account, processed_dict):
@@ -470,7 +543,8 @@ def process_account(account, processed_dict):
 
                         if contact_id:
                             opp_id = create_opportunity(contact_id, description, subject)
-                            # Notif push corporativa via ntfy
+                            # Notif push corporativa: PWA propia (con logo IF) + ntfy de respaldo
+                            notify_webpush(lead, subject, opp_id, "Idealista")
                             notify_ntfy(lead, subject, opp_id, "Idealista")
                             processed.add(f"{folder}:{eid.decode()}")
                             save_processed(processed_dict)

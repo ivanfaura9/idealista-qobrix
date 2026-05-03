@@ -1,1 +1,2 @@
 requests>=2.32.0
+pywebpush>=2.0.0
