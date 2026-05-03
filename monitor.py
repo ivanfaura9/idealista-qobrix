@@ -316,6 +316,11 @@ def create_opportunity(contact_id, description, subject):
         "description":        sanitize(description),
         "enquiry_date":       datetime.now().strftime("%Y-%m-%d"),
     }
+    # Asignar al owner (necesario para que Qobrix dispare la notif push
+    # "te han asignado un nuevo lead" al usuario del CRM cuya app móvil escucha).
+    owner_id = os.environ.get("OWNER_USER_ID", "").strip()
+    if owner_id:
+        payload["owner"] = owner_id
 
     try:
         r = requests.post(
