@@ -548,9 +548,8 @@ def process_account(account, processed_dict):
 
                         if contact_id:
                             opp_id = create_opportunity(contact_id, description, subject)
-                            # Notif push corporativa: PWA propia (con logo IF) + ntfy de respaldo
+                            # Notif push corporativa: PWA propia con logo IF Real Estate
                             notify_webpush(lead, subject, opp_id, "Idealista")
-                            notify_ntfy(lead, subject, opp_id, "Idealista")
                             processed.add(f"{folder}:{eid.decode()}")
                             save_processed(processed_dict)
                         else:
