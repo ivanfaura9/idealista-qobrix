@@ -447,13 +447,11 @@ def notify_webpush(lead, subject, opportunity_id, source_name):
     body = " · ".join(body_parts) if body_parts else "Nuevo comprador interesado"
     name = (lead.get("name") or "Nuevo lead").strip()
 
-    # Texto corporativo: nombre destacado + propiedad + ref. Sin emojis sobrecargados.
+    # Texto corporativo: 3 líneas — encabezado + nombre + propiedad.
     # Sin "title": todo en el body para minimizar el "from <PWA>" subtitle de iOS.
     lines = [f"🔥 NUEVO LEAD · {source_name.upper()}", name]
     if calle:
         lines.append(f"🏠 {calle}")
-    if ref:
-        lines.append(f"Ref. propiedad {ref}")
     full_body = "\n".join(lines)
     payload = json.dumps({
         "body":  full_body,
