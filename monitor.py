@@ -97,13 +97,34 @@ def detect_portal(from_header):
 # Subjects típicos que indican un lead real (no admin/billing).
 # Si NO hay match, no se procesa.
 LEAD_SUBJECT_KEYWORDS = [
-    "nuevo mensaje",         # Idealista: "Nuevo mensaje de NOMBRE sobre tu inmueble..."
-    "te ha contactado",      # Variantes
-    "consulta sobre",        # Fotocasa probable
-    "interesado en",         # Otros
-    "contacto sobre",        # Habitaclia probable
-    "mensaje de",            # Genérico
+    # Idealista: "Nuevo mensaje de NOMBRE sobre tu inmueble..."
+    "nuevo mensaje",
+    # Fotocasa por formulario: "Tienes un nuevo contacto en Fotocasa"
+    # Fotocasa por llamada: "Contacto para [propiedad] - De Fotocasa"
+    #                       "Has recibido una llamada en uno de tus anuncios"
+    "contacto para",
+    "has recibido una llamada",
+    "te ha llamado",
+    "tienes un nuevo contacto",
+    "nuevo contacto",
+    # Habitaclia / Milanuncios (probables)
+    "te ha contactado",
+    "consulta sobre",
+    "interesado en",
+    "contacto sobre",
+    "mensaje de",
 ]
+
+
+def is_call_lead(subject):
+    """Detecta si el lead es una LLAMADA (sin nombre/email, solo teléfono).
+    En Fotocasa, los emails de llamadas tienen el subject típico."""
+    s = (subject or "").lower()
+    return any(kw in s for kw in [
+        "has recibido una llamada",
+        "te ha llamado",
+        "contacto para",  # Fotocasa específico para llamadas
+    ])
 
 
 def is_lead_subject(subject):
@@ -564,10 +585,10 @@ def process_account(account, processed_dict):
 
                         # Filtro: descartar emails admin/billing que pasan el filtro IMAP
                         # de FROM pero no son leads reales.
+                        # NO marcamos como processed para que si añadimos keywords
+                        # nuevos al filtro, los reprocese en futuras ejecuciones.
                         if not is_lead_subject(subject):
-                            log.info(f"  SKIP (no es lead): {subject[:80]}")
-                            processed.add(f"{folder}:{eid.decode()}")
-                            save_processed(processed_dict)
+                            log.info(f"  SKIP subject (no es lead): {subject[:80]}")
                             continue
 
                         # Detectar el portal del que viene el lead
@@ -579,6 +600,13 @@ def process_account(account, processed_dict):
                         log.info(f"  EMAIL [{portal}]: {subject[:80]}")
 
                         lead = parse_lead(subject, text_body, html_body, reply_to)
+
+                        # Si es una LLAMADA (solo teléfono, sin nombre/email),
+                        # poner un nombre placeholder identificativo.
+                        if is_call_lead(subject) and not lead.get("name"):
+                            from datetime import datetime as _dt
+                            lead["name"] = f"Llamada {portal} {_dt.now().strftime('%d/%m %H:%M')}"
+
                         log.info(f"    nombre={lead['name']!r}  "
                                  f"email={lead['email']!r}  "
                                  f"tel={lead['phone']!r}")
