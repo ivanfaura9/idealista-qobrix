@@ -68,8 +68,47 @@ ACCOUNTS = [
     },
 ]
 
-# Filtro IMAP — solo emails de leads reales de Idealista (no admin/billing)
-IMAP_SEARCH = 'FROM "idealista" SINCE 01-Jan-2026 SUBJECT "Nuevo mensaje de"'
+# Filtro IMAP — emails de leads de cualquiera de los 4 portales soportados.
+# Notación IMAP OR es prefijo: "OR a b" significa a OR b. Anidamos para 4 alternativas.
+IMAP_SEARCH = (
+    '(OR (OR (OR FROM "idealista" FROM "fotocasa") FROM "habitaclia") FROM "milanuncios") '
+    'SINCE 01-Jan-2026'
+)
+
+# Detección del portal a partir del campo From del email.
+# Mapea sustrings en el From → nombre del portal para mostrar en la notif.
+PORTAL_DETECTORS = [
+    ("idealista",   "Idealista"),
+    ("fotocasa",    "Fotocasa"),
+    ("habitaclia",  "Habitaclia"),
+    ("milanuncios", "Milanuncios"),
+]
+
+
+def detect_portal(from_header):
+    """Devuelve 'Idealista' / 'Fotocasa' / 'Habitaclia' / 'Milanuncios' a partir del From."""
+    fh = (from_header or "").lower()
+    for needle, label in PORTAL_DETECTORS:
+        if needle in fh:
+            return label
+    return "Portal"  # fallback genérico
+
+
+# Subjects típicos que indican un lead real (no admin/billing).
+# Si NO hay match, no se procesa.
+LEAD_SUBJECT_KEYWORDS = [
+    "nuevo mensaje",         # Idealista: "Nuevo mensaje de NOMBRE sobre tu inmueble..."
+    "te ha contactado",      # Variantes
+    "consulta sobre",        # Fotocasa probable
+    "interesado en",         # Otros
+    "contacto sobre",        # Habitaclia probable
+    "mensaje de",            # Genérico
+]
+
+
+def is_lead_subject(subject):
+    s = (subject or "").lower()
+    return any(kw in s for kw in LEAD_SUBJECT_KEYWORDS)
 
 QOBRIX_BASE_URL = required_env("QOBRIX_URL").rstrip("/") + "/api/v2"
 QOBRIX_HEADERS  = {
@@ -306,12 +345,12 @@ def create_contact(name, email_addr, phone, description):
     return None
 
 
-def create_opportunity(contact_id, description, subject):
+def create_opportunity(contact_id, description, subject, portal="Idealista"):
     payload = {
         "contact_name":       contact_id,
         "status":             "new",
         "source":             "external_site",
-        "source_description": "Idealista",
+        "source_description": portal,
         "buy_rent":           "to_buy",
         "description":        sanitize(description),
         "enquiry_date":       datetime.now().strftime("%Y-%m-%d"),
@@ -449,7 +488,7 @@ def notify_webpush(lead, subject, opportunity_id, source_name):
 
     # Texto corporativo: 2 líneas. Encabezado con nombre integrado, propiedad debajo.
     # Sin "title": todo en el body para minimizar el "from <PWA>" subtitle de iOS.
-    lines = [f"🔥 LEAD · {source_name.upper()} de {name}"]
+    lines = [f"🟢 LEAD · {source_name.upper()} de {name}"]
     if calle:
         lines.append(f"🏠 {calle}")
     full_body = "\n".join(lines)
@@ -523,10 +562,21 @@ def process_account(account, processed_dict):
                         from_hdr = decode_str(msg.get("From", ""))
                         reply_to = decode_str(msg.get("Reply-To", ""))
 
+                        # Filtro: descartar emails admin/billing que pasan el filtro IMAP
+                        # de FROM pero no son leads reales.
+                        if not is_lead_subject(subject):
+                            log.info(f"  SKIP (no es lead): {subject[:80]}")
+                            processed.add(f"{folder}:{eid.decode()}")
+                            save_processed(processed_dict)
+                            continue
+
+                        # Detectar el portal del que viene el lead
+                        portal = detect_portal(from_hdr)
+
                         text_body, html_body = get_email_body(msg)
                         plain_text = text_body or html_to_text(html_body)
 
-                        log.info(f"  EMAIL: {subject[:80]}")
+                        log.info(f"  EMAIL [{portal}]: {subject[:80]}")
 
                         lead = parse_lead(subject, text_body, html_body, reply_to)
                         log.info(f"    nombre={lead['name']!r}  "
@@ -534,7 +584,7 @@ def process_account(account, processed_dict):
                                  f"tel={lead['phone']!r}")
 
                         description = (
-                            f"Lead Idealista\n"
+                            f"Lead {portal}\n"
                             f"Asunto: {subject}\n"
                             f"De: {from_hdr}\n"
                             f"Cuenta: {user}\n"
@@ -547,9 +597,9 @@ def process_account(account, processed_dict):
                         )
 
                         if contact_id:
-                            opp_id = create_opportunity(contact_id, description, subject)
+                            opp_id = create_opportunity(contact_id, description, subject, portal)
                             # Notif push corporativa: PWA propia con logo IF Real Estate
-                            notify_webpush(lead, subject, opp_id, "Idealista")
+                            notify_webpush(lead, subject, opp_id, portal)
                             processed.add(f"{folder}:{eid.decode()}")
                             save_processed(processed_dict)
                         else:
