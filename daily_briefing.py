@@ -42,10 +42,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # Mismo set de calendarios que calendar_sync.py
+# (Valoracion propiedad excluido - lo gestiona GHL)
 DEFAULT_CALENDARS = [
     "a2d83dc57c44b7d82c7c1f6e3c5d173b472e27e5fd41b2596e9a0dd4a2b365a0@group.calendar.google.com",
     "8f7ebb4a3a6a4bb627446f87d2b6f0665dc2949803bb3efb2d6d5633e6045114@group.calendar.google.com",
-    "420e611a0658d728d52106b63ac40b14bc6a4dd6f67f37074d1520984c0bd97a@group.calendar.google.com",
 ]
 
 

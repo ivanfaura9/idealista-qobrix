@@ -60,14 +60,15 @@ SYNCED_FILE = os.path.join(SCRIPT_DIR, "synced_meetings.json")
 OWNER_USER_ID = os.environ.get("OWNER_USER_ID", "").strip()
 
 # IDs de los calendarios de trabajo a sincronizar.
+# IMPORTANTE: El calendar "Valoracion propiedad" NO se incluye porque
+# lo gestiona GHL automaticamente al entrar nuevos propietarios por campañas.
+# Tocarlo aqui crearia duplicados.
 # (Override via env var CALENDARS_TO_SYNC con JSON list para añadir/quitar.)
 DEFAULT_CALENDARS = [
     # Visitas propiedades
     "a2d83dc57c44b7d82c7c1f6e3c5d173b472e27e5fd41b2596e9a0dd4a2b365a0@group.calendar.google.com",
     # IF REAL ESTATE (llamadas con clientes)
     "8f7ebb4a3a6a4bb627446f87d2b6f0665dc2949803bb3efb2d6d5633e6045114@group.calendar.google.com",
-    # Valoracion propiedad
-    "420e611a0658d728d52106b63ac40b14bc6a4dd6f67f37074d1520984c0bd97a@group.calendar.google.com",
 ]
 
 
@@ -263,6 +264,14 @@ def search_contact_by_name(name):
 # Upsert Meeting Qobrix
 # ──────────────────────────────────────────────
 def upsert_meeting(event, contact, synced):
+    """Crea o actualiza Meeting en Qobrix.
+
+    - El campo `subject` lo auto-genera Qobrix; NO se manda.
+    - El titulo del calendar va a la primera linea de `description`.
+    - El contacto se vincula con el campo `contact` (UUID).
+    - PATCH preserva el `contact` existente si la Meeting ya tenia uno
+      (evita pisar un link manual).
+    """
     event_id = event["id"]
     contact_id = None
     if contact:
@@ -275,32 +284,37 @@ def upsert_meeting(event, contact, synced):
 
     summary = event.get("summary", "(sin titulo)")
     location = event.get("location", "")
-    description = event.get("description", "") or ""
-    if contact_id:
-        description = (description + "\n\n[Auto-vinculado al contacto Qobrix]").strip()
-    else:
-        description = (description + "\n\n[Sin contacto Qobrix vinculado - linkar manual]").strip()
+    base_desc = event.get("description", "") or ""
+    description = f"{summary}\n\n{base_desc}".strip() if base_desc else summary
+    description = (description + "\n\n[Auto-sync Google Calendar]").strip()
 
     payload = {
-        "subject": summary[:200],
-        "description": description[:1000] or "Sincronizado desde Google Calendar",
+        "description": description[:1000],
         "location": location[:200],
         "start_date": start,
         "end_date": end,
     }
-    if contact_id:
-        payload["contact_name"] = contact_id
     if OWNER_USER_ID:
         payload["assigned_to"] = OWNER_USER_ID
-        payload["owner"] = OWNER_USER_ID
 
     qobrix_id = synced.get(event_id)
     try:
         if qobrix_id:
+            # PATCH: NO tocar el campo contact si ya estaba enlazado manualmente
+            try:
+                existing = qobrix_get(f"/meetings/{qobrix_id}")
+                existing_data = existing.get("data") or existing
+                already_linked = bool(existing_data.get("contact"))
+            except Exception:
+                already_linked = False
+            if contact_id and not already_linked:
+                payload["contact"] = contact_id
             qobrix_patch(f"/meetings/{qobrix_id}", payload)
-            link = "✓ contacto" if contact_id else "✗ sin contacto"
+            link = "(preservado)" if already_linked else ("✓ contacto" if contact_id else "✗ sin contacto")
             log.info(f"  ↻ Meeting actualizada: {summary[:50]} ({fmt_time(start)}) [{link}]")
         else:
+            if contact_id:
+                payload["contact"] = contact_id
             r = qobrix_post("/meetings", payload)
             new_id = (r.get("data") or {}).get("id") or r.get("id")
             if new_id:
