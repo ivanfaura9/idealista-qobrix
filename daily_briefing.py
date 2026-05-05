@@ -2,21 +2,28 @@
 """
 daily_briefing.py - Push matinal con la agenda del dia (07:30 hora local)
 ==========================================================================
-Lee Google Calendar primario para HOY (00:00 - 23:59 Europe/Madrid).
-Enumera visitas/eventos con clientes y manda 1 push corporativo con resumen:
+Lee los calendarios de TRABAJO de Iván para HOY (00:00 - 23:59 Europe/Madrid):
+  - Visitas propiedades
+  - IF REAL ESTATE (llamadas con clientes)
+  - Valoracion propiedad
 
-  📅 3 visitas hoy:
-  10:40 Ana — piso ref 1093
-  16:00 Joan Molina (revision)
-  18:30 Marta Soler — Bassegoda 21
+Enumera visitas/llamadas/valoraciones y manda 1 push corporativo con resumen:
+
+  ☀️ 4 eventos hoy:
+  10:40 Visita piso Pallaresa con Ana
+  12:00 📞Llamada con Laura Nonell
+  14:00 Captación piso venta Emilio
+  16:30 Visita piso ... con Joan
 
 Si no hay eventos, manda push con "Sin visitas hoy. Buen dia."
 """
 
 import os
 import sys
+import json
 import logging
 import socket
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from if_common import (
@@ -34,8 +41,27 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Europe/Madrid es UTC+2 en CEST (verano), UTC+1 en CET (invierno).
-# Usamos offset basado en mes para evitar dependencia externa.
+# Mismo set de calendarios que calendar_sync.py
+DEFAULT_CALENDARS = [
+    "a2d83dc57c44b7d82c7c1f6e3c5d173b472e27e5fd41b2596e9a0dd4a2b365a0@group.calendar.google.com",
+    "8f7ebb4a3a6a4bb627446f87d2b6f0665dc2949803bb3efb2d6d5633e6045114@group.calendar.google.com",
+    "420e611a0658d728d52106b63ac40b14bc6a4dd6f67f37074d1520984c0bd97a@group.calendar.google.com",
+]
+
+
+def calendars_to_read():
+    raw = os.environ.get("CALENDARS_TO_SYNC", "").strip()
+    if not raw:
+        return DEFAULT_CALENDARS
+    try:
+        d = json.loads(raw)
+        if isinstance(d, list) and d:
+            return d
+    except Exception:
+        pass
+    return DEFAULT_CALENDARS
+
+
 def madrid_tz():
     m = datetime.utcnow().month
     return timezone(timedelta(hours=2 if 3 <= m <= 10 else 1))
@@ -69,46 +95,49 @@ def main():
     time_min = today_local.isoformat()
     time_max = end_local.isoformat()
 
-    try:
-        events = gcal_get(
-            "/calendars/primary/events",
-            params={
-                "timeMin": time_min,
-                "timeMax": time_max,
-                "singleEvents": "true",
-                "orderBy": "startTime",
-                "maxResults": "30",
-            },
-            access_token=token,
-        )
-    except Exception as exc:
-        log.error(f"GCal API fallo: {exc}")
-        return 1
+    all_events = []
+    for cal_id in calendars_to_read():
+        cal_path = "/calendars/" + urllib.parse.quote(cal_id, safe="") + "/events"
+        try:
+            data = gcal_get(
+                cal_path,
+                params={
+                    "timeMin": time_min,
+                    "timeMax": time_max,
+                    "singleEvents": "true",
+                    "orderBy": "startTime",
+                    "maxResults": "30",
+                },
+                access_token=token,
+            )
+            for e in data.get("items", []):
+                if e.get("status") != "cancelled":
+                    all_events.append(e)
+        except Exception as exc:
+            log.error(f"GCal API fallo en {cal_id[:30]}...: {exc}")
 
-    items = [e for e in events.get("items", []) if e.get("status") != "cancelled"]
-    log.info(f"Eventos hoy: {len(items)}")
+    # Ordenar por start time
+    def start_key(e):
+        return e.get("start", {}).get("dateTime") or e.get("start", {}).get("date") or ""
+    all_events.sort(key=start_key)
 
-    if not items:
-        send_push("☀️ Buen dia. Sin visitas hoy.", url=QOBRIX_BASE, tag="briefing")
+    log.info(f"Eventos hoy en calendarios de trabajo: {len(all_events)}")
+
+    if not all_events:
+        send_push("☀️ Buen dia. Sin visitas ni llamadas hoy.", url=QOBRIX_BASE, tag="briefing")
         return 0
 
-    n = len(items)
-    if n == 1:
-        header = "☀️ 1 evento hoy:"
-    else:
-        header = f"☀️ {n} eventos hoy:"
-
+    n = len(all_events)
+    header = "☀️ 1 evento hoy:" if n == 1 else f"☀️ {n} eventos hoy:"
     lines = [header]
-    for ev in items[:5]:  # tope 5 para que el push no sea kilometrico
-        start = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date", "")
-        title = ev.get("summary", "(sin titulo)").strip()
-        # Resumen corto
-        if len(title) > 60:
-            title = title[:57] + "..."
+    for ev in all_events[:6]:  # tope 6 lineas extra
+        start = start_key(ev)
+        title = (ev.get("summary") or "(sin titulo)").strip()
+        if len(title) > 55:
+            title = title[:52] + "..."
         lines.append(f"{fmt_hhmm(start)} {title}")
-
-    if n > 5:
-        lines.append(f"+{n - 5} mas")
+    if n > 6:
+        lines.append(f"+{n - 6} mas")
 
     send_push("\n".join(lines), url=QOBRIX_BASE + "/crm/calendar", tag="briefing")
     return 0
