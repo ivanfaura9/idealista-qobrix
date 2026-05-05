@@ -1,0 +1,37 @@
+name: Daily briefing (push 7:30 hora local)
+
+on:
+  schedule:
+    # 5:30 UTC = 7:30 CEST (verano) o 6:30 CET (invierno)
+    # Aceptable trade-off para no depender de TZ database
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run daily_briefing
+        env:
+          GOOGLE_CLIENT_ID:      ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET:  ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN:  ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          QOBRIX_URL:            ${{ secrets.QOBRIX_URL }}
+          VAPID_PRIVATE_KEY:     ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_EMAIL:           ${{ secrets.VAPID_EMAIL }}
+          WEBPUSH_SUBSCRIPTIONS: ${{ secrets.WEBPUSH_SUBSCRIPTIONS }}
+        run: python daily_briefing.py

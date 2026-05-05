@@ -1,0 +1,56 @@
+name: Calendar sync (Google -> Qobrix)
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # cada 15 min
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: calendar
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run calendar_sync
+        env:
+          GOOGLE_CLIENT_ID:      ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET:  ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN:  ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          QOBRIX_URL:            ${{ secrets.QOBRIX_URL }}
+          QOBRIX_USER:           ${{ secrets.QOBRIX_USER }}
+          QOBRIX_KEY:            ${{ secrets.QOBRIX_KEY }}
+          OWNER_USER_ID:         ${{ secrets.OWNER_USER_ID }}
+        run: python calendar_sync.py
+
+      - name: Commit synced_meetings.json if changed
+        run: |
+          if ! git diff --quiet synced_meetings.json 2>/dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add synced_meetings.json
+            git commit -m "chore: update synced_meetings [skip ci]"
+            git push
+          else
+            echo "No changes in synced_meetings.json"
+          fi

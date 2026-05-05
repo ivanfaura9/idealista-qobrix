@@ -1,0 +1,36 @@
+name: Stale leads (push 21:00 hora local)
+
+on:
+  schedule:
+    # 19:00 UTC = 21:00 CEST (verano) o 20:00 CET (invierno)
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run stale_leads
+        env:
+          QOBRIX_URL:            ${{ secrets.QOBRIX_URL }}
+          QOBRIX_USER:           ${{ secrets.QOBRIX_USER }}
+          QOBRIX_KEY:            ${{ secrets.QOBRIX_KEY }}
+          OWNER_USER_ID:         ${{ secrets.OWNER_USER_ID }}
+          VAPID_PRIVATE_KEY:     ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_EMAIL:           ${{ secrets.VAPID_EMAIL }}
+          WEBPUSH_SUBSCRIPTIONS: ${{ secrets.WEBPUSH_SUBSCRIPTIONS }}
+        run: python stale_leads.py
