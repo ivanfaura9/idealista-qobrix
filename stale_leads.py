@@ -53,13 +53,12 @@ def main():
         log.warning("OWNER_USER_ID no configurado, salgo.")
         return 0
 
-    # Buscar oportunidades nuevas asignadas al owner
-    search = f'status == "new" and assigned_to == "{OWNER_USER_ID}"'
+    # Buscar oportunidades nuevas del owner. Campo Qobrix = "owner" (no assigned_to).
+    search = f'status == "new" and owner == "{OWNER_USER_ID}"'
     try:
         params = {
             "search": search,
             "limit": "100",
-            "sort": "-created",
         }
         data = qobrix_get("/opportunities?" + urllib.parse.urlencode(params, safe='="'))
     except Exception as exc:
