@@ -85,46 +85,65 @@ PORTAL_DETECTORS = [
 ]
 
 
-def detect_portal(from_header):
-    """Devuelve 'Idealista' / 'Fotocasa' / 'Habitaclia' / 'Milanuncios' a partir del From."""
-    fh = (from_header or "").lower()
-    for needle, label in PORTAL_DETECTORS:
-        if needle in fh:
+def detect_portal(from_header, subject="", body=""):
+    """Devuelve 'Idealista' / 'Fotocasa' / 'Habitaclia' / 'Milanuncios'.
+    Fotocasa Pro group manda emails para los 3 últimos desde 'Fotocasa Pro <cliente@fotocasa.pro>',
+    así que detectar el portal real REQUIERE mirar también el subject/body
+    (que dice 'De habitaclia', 'De Fotocasa', 'De milanuncios', etc.).
+    Orden de prioridad: portales especializados primero, fotocasa al final."""
+    text = f"{from_header} {subject} {body[:500]}".lower()
+    for needle, label in [
+        ("habitaclia",  "Habitaclia"),
+        ("milanuncios", "Milanuncios"),
+        ("idealista",   "Idealista"),
+        ("fotocasa",    "Fotocasa"),
+    ]:
+        if needle in text:
             return label
-    return "Portal"  # fallback genérico
+    return "Portal"
 
 
-# Subjects típicos que indican un lead real (no admin/billing).
-# Si NO hay match, no se procesa.
+# Subjects que indican un lead real (cliente interesado).
 LEAD_SUBJECT_KEYWORDS = [
-    # Idealista: "Nuevo mensaje de NOMBRE sobre tu inmueble..."
-    "nuevo mensaje",
-    # Fotocasa por formulario: "Tienes un nuevo contacto en Fotocasa"
-    # Fotocasa por llamada: "Contacto para [propiedad] - De Fotocasa"
-    #                       "Has recibido una llamada en uno de tus anuncios"
-    "contacto para",
-    "has recibido una llamada",
-    "te ha llamado",
-    "tienes un nuevo contacto",
-    "nuevo contacto",
-    # Habitaclia / Milanuncios (probables)
+    "nuevo mensaje",          # Idealista: "Nuevo mensaje de NOMBRE sobre tu inmueble..."
+    "tienes un nuevo contacto",  # Fotocasa Pro formulario
+    "contacto para",          # Fotocasa Pro group (Fotocasa, Habitaclia, Milanuncios)
+    "has recibido una llamada",  # Fotocasa Pro llamadas
     "te ha contactado",
     "consulta sobre",
-    "interesado en",
     "contacto sobre",
     "mensaje de",
 ]
 
+# Subjects que son ADMIN/billing/notifs (NO son leads, deben ignorarse).
+EXCLUDE_SUBJECT_KEYWORDS = [
+    "llamada atendida de un interesado",   # Idealista admin
+    "llamada comunicando de un interesado", # Idealista admin
+    "factura",
+    "incidencia",
+    "renovación",
+    "publicación de",
+    "suscripción",
+    "newsletter",
+    "qobrix qa",                            # Qobrix internal QA tests
+    "qa test",
+]
 
-def is_call_lead(subject):
-    """Detecta si el lead es una LLAMADA (sin nombre/email, solo teléfono).
-    En Fotocasa, los emails de llamadas tienen el subject típico."""
+
+def is_lead_subject(subject):
+    """True si el subject indica un lead real (no admin/billing/test)."""
     s = (subject or "").lower()
-    return any(kw in s for kw in [
-        "has recibido una llamada",
-        "te ha llamado",
-        "contacto para",  # Fotocasa específico para llamadas
-    ])
+    if any(kw in s for kw in EXCLUDE_SUBJECT_KEYWORDS):
+        return False
+    return any(kw in s for kw in LEAD_SUBJECT_KEYWORDS)
+
+
+def is_call_lead(subject, body=""):
+    """Detecta si el lead es una LLAMADA telefónica (sin nombre/email del cliente).
+    Mirar el cuerpo es más fiable porque el subject de Fotocasa Pro es el mismo
+    para llamadas Y formularios."""
+    text = f"{subject} {body}".lower()
+    return "has recibido una llamada" in text or "ha llamado interesándose" in text
 
 
 def is_lead_subject(subject):
@@ -591,19 +610,32 @@ def process_account(account, processed_dict):
                             log.info(f"  SKIP subject (no es lead): {subject[:80]}")
                             continue
 
-                        # Detectar el portal del que viene el lead
-                        portal = detect_portal(from_hdr)
-
                         text_body, html_body = get_email_body(msg)
                         plain_text = text_body or html_to_text(html_body)
+
+                        # Detectar el portal mirando from + subject + body
+                        portal = detect_portal(from_hdr, subject, plain_text)
 
                         log.info(f"  EMAIL [{portal}]: {subject[:80]}")
 
                         lead = parse_lead(subject, text_body, html_body, reply_to)
 
-                        # Si es una LLAMADA (solo teléfono, sin nombre/email),
-                        # poner un nombre placeholder identificativo.
-                        if is_call_lead(subject) and not lead.get("name"):
+                        # Fotocasa Pro formulario: el nombre del cliente NO está
+                        # en el subject sino en el cuerpo. Buscar patterns típicos.
+                        if not lead.get("name") and html_body:
+                            for pat in [
+                                r'A\s+([A-ZÁÉÍÓÚÑ][\wáéíóúñ\.\-]+(?:\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ\.\-]+){0,3})\s+le interesa',
+                                r'Nombre[:\s]+(?:<[^>]+>\s*)*([A-ZÁÉÍÓÚÑ][\wáéíóúñ\.\-]+(?:\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ\.\-]+){0,3})',
+                                r'<strong>\s*([A-ZÁÉÍÓÚÑ][\wáéíóúñ\.\-]+(?:\s+[A-ZÁÉÍÓÚÑ][\wáéíóúñ\.\-]+){0,3})\s*</strong>',
+                            ]:
+                                m = re.search(pat, html_body)
+                                if m:
+                                    lead["name"] = m.group(1).strip()
+                                    break
+
+                        # Si es LLAMADA (solo teléfono, sin nombre/email del cliente),
+                        # asignar un placeholder identificativo con fecha/hora.
+                        if is_call_lead(subject, plain_text) and not lead.get("name"):
                             from datetime import datetime as _dt
                             lead["name"] = f"Llamada {portal} {_dt.now().strftime('%d/%m %H:%M')}"
 
