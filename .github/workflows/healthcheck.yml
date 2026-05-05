@@ -1,0 +1,52 @@
+name: Healthcheck (asegura que monitor + calendar corren)
+
+# Si los crons de 5/15 min fallan/se retrasan por saturacion del runner,
+# este workflow cada hora dispara los workflows manualmente para garantizar
+# que al menos uno se ejecuta en cada ventana de 1 hora.
+
+on:
+  schedule:
+    - cron: "23 * * * *"   # cada hora a y 23 (evita la franja punta de :00)
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Check & dispatch monitor + calendar if stale
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+          NOW=$(date -u +%s)
+
+          check_and_dispatch() {
+            local WF="$1"
+            local MAX_AGE_MIN="$2"
+            # Buscar último run completado o in_progress de este workflow
+            LAST=$(gh run list --repo "$REPO" --workflow="$WF" --limit 1 --json createdAt,status,conclusion -q '.[0].createdAt' || echo "")
+            if [ -z "$LAST" ]; then
+              echo "No hay runs previos de $WF, disparando..."
+              gh workflow run "$WF" --repo "$REPO"
+              return
+            fi
+            LAST_TS=$(date -u -d "$LAST" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST" +%s 2>/dev/null || echo 0)
+            AGE_MIN=$(( (NOW - LAST_TS) / 60 ))
+            echo "$WF -> ultimo run hace $AGE_MIN min (umbral $MAX_AGE_MIN)"
+            if [ "$AGE_MIN" -gt "$MAX_AGE_MIN" ]; then
+              echo "  ↳ stale, disparando..."
+              gh workflow run "$WF" --repo "$REPO"
+            else
+              echo "  ↳ ok, no necesita dispatch"
+            fi
+          }
+
+          check_and_dispatch "run.yml" 15        # monitor: si lleva >15min sin run, dispara
+          check_and_dispatch "calendar.yml" 30   # calendar: si lleva >30min sin run, dispara
