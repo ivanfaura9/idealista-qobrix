@@ -1,12 +1,14 @@
-name: Healthcheck (asegura que monitor + calendar corren)
+name: Healthcheck (asegura que monitor + calendar + morning + stale corren)
 
-# Si los crons de 5/15 min fallan/se retrasan por saturacion del runner,
-# este workflow cada hora dispara los workflows manualmente para garantizar
-# que al menos uno se ejecuta en cada ventana de 1 hora.
+# Si los crons base fallan/se retrasan por saturacion del runner, este
+# workflow horario dispara los workflows manualmente para garantizar
+# que los 4 sistemas se ejecutan en sus ventanas.
 
 on:
   schedule:
-    - cron: "23 * * * *"   # cada hora a y 23 (evita la franja punta de :00)
+    # Cada 30 min para reducir el lag maximo a ~30 min
+    # (se evita la franja punta de :00 / :30 con un offset)
+    - cron: "13,43 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,34 +21,65 @@ jobs:
     timeout-minutes: 3
 
     steps:
-      - name: Check & dispatch monitor + calendar if stale
+      - name: Check & dispatch workflows si stale
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           REPO="${{ github.repository }}"
           NOW=$(date -u +%s)
+          NOW_HOUR=$(date -u +%-H)   # hora UTC actual (entero)
+          TODAY=$(date -u +%Y-%m-%d)
 
-          check_and_dispatch() {
+          last_run_ts() {
             local WF="$1"
-            local MAX_AGE_MIN="$2"
-            # Buscar último run completado o in_progress de este workflow
-            LAST=$(gh run list --repo "$REPO" --workflow="$WF" --limit 1 --json createdAt,status,conclusion -q '.[0].createdAt' || echo "")
-            if [ -z "$LAST" ]; then
-              echo "No hay runs previos de $WF, disparando..."
-              gh workflow run "$WF" --repo "$REPO"
-              return
-            fi
-            LAST_TS=$(date -u -d "$LAST" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST" +%s 2>/dev/null || echo 0)
-            AGE_MIN=$(( (NOW - LAST_TS) / 60 ))
-            echo "$WF -> ultimo run hace $AGE_MIN min (umbral $MAX_AGE_MIN)"
-            if [ "$AGE_MIN" -gt "$MAX_AGE_MIN" ]; then
-              echo "  ↳ stale, disparando..."
-              gh workflow run "$WF" --repo "$REPO"
-            else
-              echo "  ↳ ok, no necesita dispatch"
-            fi
+            local LAST=$(gh run list --repo "$REPO" --workflow="$WF" --limit 1 --json createdAt -q '.[0].createdAt' 2>/dev/null || echo "")
+            if [ -z "$LAST" ]; then echo 0; return; fi
+            date -u -d "$LAST" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST" +%s 2>/dev/null || echo 0
           }
 
-          check_and_dispatch "run.yml" 15        # monitor: si lleva >15min sin run, dispara
-          check_and_dispatch "calendar.yml" 30   # calendar: si lleva >30min sin run, dispara
+          last_run_today() {
+            # Devuelve "yes" si el ultimo run del workflow es de HOY UTC
+            local WF="$1"
+            local LAST=$(gh run list --repo "$REPO" --workflow="$WF" --limit 1 --json createdAt -q '.[0].createdAt' 2>/dev/null || echo "")
+            if [ -z "$LAST" ]; then echo "no"; return; fi
+            if [[ "$LAST" == "${TODAY}"* ]]; then echo "yes"; else echo "no"; fi
+          }
+
+          # ─── 1. monitor: si lleva > 15 min sin correr ─── #
+          AGE=$(( (NOW - $(last_run_ts "run.yml")) / 60 ))
+          echo "run.yml -> hace $AGE min"
+          if [ "$AGE" -gt 15 ]; then
+            echo "  ↳ stale, disparando..."
+            gh workflow run "run.yml" --repo "$REPO" || true
+          fi
+
+          # ─── 2. calendar: si lleva > 30 min sin correr ─── #
+          AGE=$(( (NOW - $(last_run_ts "calendar.yml")) / 60 ))
+          echo "calendar.yml -> hace $AGE min"
+          if [ "$AGE" -gt 30 ]; then
+            echo "  ↳ stale, disparando..."
+            gh workflow run "calendar.yml" --repo "$REPO" || true
+          fi
+
+          # ─── 3. morning briefing: si la hora UTC >= 5 (7am CEST/6am CET) y aun no corrio HOY ─── #
+          if [ "$NOW_HOUR" -ge 5 ] && [ "$NOW_HOUR" -lt 12 ]; then
+            TODAY_RAN=$(last_run_today "morning.yml")
+            echo "morning.yml -> hoy=$TODAY_RAN, hora=$NOW_HOUR"
+            if [ "$TODAY_RAN" = "no" ]; then
+              echo "  ↳ no ha corrido hoy y ya es de dia, disparando..."
+              gh workflow run "morning.yml" --repo "$REPO" || true
+            fi
+          fi
+
+          # ─── 4. stale leads: si la hora UTC >= 19 (21h CEST/20h CET) y aun no corrio HOY ─── #
+          if [ "$NOW_HOUR" -ge 19 ] && [ "$NOW_HOUR" -lt 24 ]; then
+            TODAY_RAN=$(last_run_today "stale.yml")
+            echo "stale.yml -> hoy=$TODAY_RAN, hora=$NOW_HOUR"
+            if [ "$TODAY_RAN" = "no" ]; then
+              echo "  ↳ no ha corrido hoy y ya es noche, disparando..."
+              gh workflow run "stale.yml" --repo "$REPO" || true
+            fi
+          fi
+
+          echo "Healthcheck completo"
