@@ -467,6 +467,34 @@ def find_property_by_ref(ref):
     return None
 
 
+def create_call_log(contact_id, opportunity_id, subject, description, portal):
+    """Registra una entrada en el log de Calls de Qobrix para una llamada inbound.
+    Vinculada al contacto y a la oportunidad. No falla la pipeline si la API rechaza."""
+    payload = {
+        "subject":             f"Llamada {portal} - {subject[:80]}"[:200],
+        "description":         sanitize(description, max_len=1000),
+        "contact":             contact_id,
+        "direction":           "inbound",
+        "duration":            0,
+        "start_date":          datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+    }
+    if opportunity_id:
+        payload["related_opportunity"] = opportunity_id
+
+    try:
+        r = requests.post(
+            f"{QOBRIX_BASE_URL}/calls",
+            headers=QOBRIX_HEADERS, json=payload, timeout=30,
+        )
+        r.raise_for_status()
+        cid = r.json().get("data", {}).get("id")
+        log.info(f"  Llamada registrada en log de Calls: [{cid}]")
+        return cid
+    except Exception as exc:
+        log.warning(f"  No se pudo crear Call log: {exc}")
+        return None
+
+
 def create_opportunity(contact_id, description, subject, portal="Idealista", property_id=None):
     payload = {
         "contact_name":       contact_id,
@@ -569,10 +597,12 @@ def notify_ntfy(lead, subject, opportunity_id, source_name):
 # ──────────────────────────────────────────────
 # NOTIFICACION WEB PUSH (PWA propia con logo IF)
 # ──────────────────────────────────────────────
-def notify_webpush(lead, subject, opportunity_id, source_name):
+def notify_webpush(lead, subject, opportunity_id, source_name, is_call=False):
     """Envia push a TODAS las suscripciones registradas en WEBPUSH_SUBSCRIPTIONS.
     Cada suscripcion es un dict {endpoint, keys: {p256dh, auth}}.
-    Si no hay nada configurado o falla la libreria, silencio limpio."""
+    Si no hay nada configurado o falla la libreria, silencio limpio.
+
+    is_call=True: la notif distingue 'LLAMADA' y sugiere crear visita."""
     subs_json = os.environ.get("WEBPUSH_SUBSCRIPTIONS", "").strip()
     private_key = os.environ.get("VAPID_PRIVATE_KEY", "").strip()
     if not subs_json or not private_key:
@@ -613,16 +643,27 @@ def notify_webpush(lead, subject, opportunity_id, source_name):
     body = " · ".join(body_parts) if body_parts else "Nuevo comprador interesado"
     name = (lead.get("name") or "Nuevo lead").strip()
 
-    # Texto corporativo: 2 líneas. Encabezado con nombre integrado, propiedad debajo.
-    # Sin "title": todo en el body para minimizar el "from <PWA>" subtitle de iOS.
-    lines = [f"🟢 LEAD · {source_name.upper()} de {name}"]
+    # Texto corporativo: 2-3 líneas. Sin "title": todo en el body para minimizar el
+    # "from <PWA>" subtitle de iOS.
+    if is_call:
+        # LLAMADA: header distintivo + invita a crear visita
+        header = f"📞 LLAMADA · {source_name.upper()} · {name}"
+    else:
+        # FORMULARIO / contacto escrito normal
+        header = f"🟢 LEAD · {source_name.upper()} de {name}"
+    lines = [header]
     if calle:
         lines.append(f"🏠 {calle}")
+    elif ref:
+        lines.append(f"🏠 ref {ref}")
+    if is_call:
+        lines.append("👉 Toca para abrir y crear visita")
     full_body = "\n".join(lines)
+
     payload = json.dumps({
         "body":  full_body,
         "url":   f"{qobrix_base}/crm/opportunities/{opportunity_id}" if opportunity_id else qobrix_base,
-        "tag":   f"lead-{opportunity_id or 'new'}",
+        "tag":   f"{'call' if is_call else 'lead'}-{opportunity_id or 'new'}",
     })
 
     sent = 0
@@ -753,8 +794,12 @@ def process_account(account, processed_dict):
                                 contact_id, description, subject, portal,
                                 property_id=property_id,
                             )
+                            # Si es una LLAMADA (no formulario), registra entrada en /calls
+                            is_call = is_call_lead(subject, plain_text or "")
+                            if is_call:
+                                create_call_log(contact_id, opp_id, subject, description, portal)
                             # Notif push corporativa: PWA propia con logo IF Real Estate
-                            notify_webpush(lead, subject, opp_id, portal)
+                            notify_webpush(lead, subject, opp_id, portal, is_call=is_call)
                             processed.add(f"{folder}:{eid.decode()}")
                             save_processed(processed_dict)
                         else:
