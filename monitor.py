@@ -272,7 +272,35 @@ def get_email_body(msg):
 # ──────────────────────────────────────────────
 # PARSEO DEL LEAD
 # ──────────────────────────────────────────────
-def parse_lead(subject, text_body, html_body, reply_to):
+def _name_from_header(header_value):
+    """Extrae el nombre humano de un campo From / Reply-To.
+    Acepta formatos:
+        "Miriam Casado via fotocasa.es" <noreply@fotocasa.es>  -> "Miriam Casado"
+        "Maria Lopez vía Habitaclia" <X@Y>                      -> "Maria Lopez"
+        "Juan Perez" <juan@gmail.com>                           -> "Juan Perez"
+        Idealista <X@idealista.com>                              -> None (genérico)
+    """
+    if not header_value:
+        return None
+    # Sacar el display name (lo que va antes de <email>)
+    m = re.match(r'\s*"?([^"<]+)"?\s*<', header_value)
+    display = (m.group(1) if m else header_value).strip().strip('"')
+    if not display or "@" in display:
+        return None
+    # Quitar "via fotocasa.es" / "vía habitaclia" / "via Idealista" etc
+    display = re.sub(r"\s+v[ií]a\s+[\w.]+\s*$", "", display, flags=re.I).strip()
+    # Si después de quitar es un nombre genérico de portal -> no es el cliente
+    GENERIC = ("idealista", "fotocasa", "habitaclia", "milanuncios", "noreply", "no-reply",
+               "support", "soporte", "info", "alertas", "notificaciones")
+    low = display.lower()
+    if any(g == low or low.startswith(g + " ") for g in GENERIC):
+        return None
+    if len(display) < 2 or len(display) > 80:
+        return None
+    return display
+
+
+def parse_lead(subject, text_body, html_body, reply_to, from_header=""):
     lead = {"name": "", "email": "", "phone": "", "property_url": ""}
 
     name_patterns = [
@@ -287,6 +315,7 @@ def parse_lead(subject, text_body, html_body, reply_to):
             lead["name"] = m.group(1).strip()
             break
 
+    # Body HTML con div bold (Idealista clásico)
     if not lead["name"] and html_body:
         m = re.search(
             r'<div[^>]*(?:font-weight:\s*700|font-weight:bold)[^>]*>([^<]{2,60})</div>',
@@ -296,6 +325,17 @@ def parse_lead(subject, text_body, html_body, reply_to):
             candidate = m.group(1).strip()
             if not any(w in candidate.lower() for w in ["nuevo", "mensaje", "idealista", "tienes"]):
                 lead["name"] = candidate
+
+    # NUEVO: si el cuerpo dice "No especificado" o no encontramos nombre, mirar From / Reply-To
+    # Fotocasa Pro pone el nombre en el From: "Miriam Casado via fotocasa.es" <noreply@fotocasa.es>
+    body_text = (text_body or "") + " " + re.sub(r"<[^>]+>", " ", html_body or "")
+    no_specified = re.search(r"nombre\s*[:\-]?\s*no\s+especificad", body_text, re.I)
+    if not lead["name"] or no_specified:
+        for hdr in (from_header, reply_to):
+            cand = _name_from_header(hdr)
+            if cand:
+                lead["name"] = cand
+                break
 
     if reply_to:
         m = re.search(r'([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})', reply_to, re.I)
@@ -618,7 +658,7 @@ def process_account(account, processed_dict):
 
                         log.info(f"  EMAIL [{portal}]: {subject[:80]}")
 
-                        lead = parse_lead(subject, text_body, html_body, reply_to)
+                        lead = parse_lead(subject, text_body, html_body, reply_to, from_hdr)
 
                         # Fotocasa Pro formulario: el nombre del cliente NO está
                         # en el subject sino en el cuerpo. Buscar patterns típicos.
