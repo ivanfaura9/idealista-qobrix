@@ -88,22 +88,28 @@ def list_generic_contacts():
 
 
 def find_email_in_imap(host, user, pw, target_email):
-    """Busca en IMAP un email que mencione target_email (normalmente el del cliente)."""
+    """Busca en IMAP UN email de portal inmobiliario que mencione target_email.
+    LIMITAMOS la búsqueda a emails que vienen de Idealista/Fotocasa/Habitaclia/
+    Milanuncios para evitar falsos positivos de otros remitentes."""
     if not target_email:
         return None
+    PORTALS = ("idealista", "fotocasa", "habitaclia", "milanuncios")
     try:
         mail = imaplib.IMAP4_SSL(host)
         mail.login(user, pw)
         mail.select("INBOX")
-        # Search por TEXT (lento pero efectivo) o por FROM
-        _, ids = mail.search(None, f'(BODY "{target_email}")')
-        ids_list = ids[0].split() if ids and ids[0] else []
-        if not ids_list:
+        candidate_eid = None
+        # Probar uno por portal (es más fiable que un OR anidado)
+        for portal in PORTALS:
+            _, ids = mail.search(None, f'(FROM "{portal}" BODY "{target_email}")')
+            ids_list = ids[0].split() if ids and ids[0] else []
+            if ids_list:
+                candidate_eid = ids_list[-1]   # más reciente
+                break
+        if candidate_eid is None:
             mail.logout()
             return None
-        # Coger el más reciente
-        eid = ids_list[-1]
-        _, msg_data = mail.fetch(eid, "(RFC822)")
+        _, msg_data = mail.fetch(candidate_eid, "(RFC822)")
         if not msg_data or not msg_data[0]:
             mail.logout()
             return None
@@ -112,6 +118,9 @@ def find_email_in_imap(host, user, pw, target_email):
         reply_to = decode_str(msg.get("Reply-To", ""))
         subject = decode_str(msg.get("Subject", ""))
         mail.logout()
+        # Validación extra: el FROM debe venir de un portal real
+        if not any(p in from_hdr.lower() for p in PORTALS):
+            return None
         return {"from": from_hdr, "reply_to": reply_to, "subject": subject}
     except Exception as exc:
         log.warning(f"  IMAP search '{target_email}' en {host}: {exc}")
