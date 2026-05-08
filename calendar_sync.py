@@ -206,6 +206,76 @@ def normalize(s):
 
 
 # ──────────────────────────────────────────────
+# Extraccion de email/telefono desde el cuerpo del evento
+# ──────────────────────────────────────────────
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# Acepta: 612345678, 612 34 56 78, +34 612 34 56 78, +34612345678, etc.
+PHONE_RE = re.compile(r"(?:\+\d{1,3}[\s\-]?)?(?:\d[\s\-]?){8,13}\d")
+
+
+def extract_emails(text):
+    if not text:
+        return []
+    return list(dict.fromkeys(m.group(0).strip() for m in EMAIL_RE.finditer(text)))
+
+
+def normalize_phone(s):
+    """Devuelve solo digitos del numero, ignorando prefijo +XX si lo hay (mantiene los ultimos 9 digitos)."""
+    digits = re.sub(r"\D", "", s or "")
+    if len(digits) >= 9:
+        return digits[-9:]  # ultimos 9 -> compara nacional
+    return digits
+
+
+def extract_phones(text):
+    if not text:
+        return []
+    found = []
+    for m in PHONE_RE.finditer(text):
+        raw = m.group(0)
+        nat = normalize_phone(raw)
+        if len(nat) == 9 and nat[0] in "6789":  # móviles/fijos ES
+            found.append(nat)
+    return list(dict.fromkeys(found))
+
+
+def qobrix_search_contact_by_phone(phone_nat):
+    """Busca contacto en Qobrix por phone, phone_2 o phone_3 (ultimos 9 digitos).
+    Qobrix usa 'contains' (no 'like'). Probamos varias variantes habituales."""
+    if not phone_nat or len(phone_nat) != 9:
+        return None
+    # Variantes a probar: solo 9 digitos, con +34 prefix, con prefix sin espacios
+    variants = [
+        phone_nat,                    # 628209558
+        f"+34{phone_nat}",            # +34628209558
+        f"+34 {phone_nat}",           # +34 628209558
+    ]
+    seen_ids = set()
+    candidates = []
+    for v in variants:
+        try:
+            params = {
+                "search": f'phone contains "{v}" or phone_2 contains "{v}" or phone_3 contains "{v}"',
+                "limit": "5",
+            }
+            url = QOBRIX_API + "/contacts?" + urllib.parse.urlencode(params, safe='="')
+            r = requests.get(url, headers=QOBRIX_HEADERS, timeout=30)
+            r.raise_for_status()
+            for c in (r.json().get("data") or []):
+                if c.get("id") and c["id"] not in seen_ids:
+                    seen_ids.add(c["id"])
+                    candidates.append(c)
+        except Exception as exc:
+            log.warning(f"  qobrix_search_by_phone variant {v!r}: {exc}")
+    # Confirmar normalizando los telefonos del candidato
+    for c in candidates:
+        for f in ("phone", "phone_2", "phone_3"):
+            if normalize_phone(c.get(f, "") or "") == phone_nat:
+                return c
+    return None
+
+
+# ──────────────────────────────────────────────
 # Match por nombre en Qobrix
 # ──────────────────────────────────────────────
 def search_contact_by_name(name):
@@ -351,6 +421,7 @@ def main():
 
     total_events = 0
     matched_email = 0
+    matched_phone = 0
     matched_name = 0
     no_match = 0
 
@@ -382,6 +453,7 @@ def main():
                 continue
 
             title = ev.get("summary", "(sin titulo)")
+            description = ev.get("description", "") or ""
             contact = None
 
             # 1) match por email del attendee
@@ -391,9 +463,28 @@ def main():
                 contact = qobrix_search_contact_by_email(att.get("email", "").strip())
                 if contact:
                     matched_email += 1
+                    log.info(f"  → Match por email attendee: {att.get('email','')}")
                     break
 
-            # 2) match por nombre del titulo
+            # 2) match por email en la descripcion del evento
+            if not contact:
+                for em in extract_emails(description):
+                    contact = qobrix_search_contact_by_email(em)
+                    if contact:
+                        matched_email += 1
+                        log.info(f"  → Match por email de descripcion: {em}")
+                        break
+
+            # 3) match por telefono en la descripcion del evento
+            if not contact:
+                for ph in extract_phones(description):
+                    contact = qobrix_search_contact_by_phone(ph)
+                    if contact:
+                        matched_phone += 1
+                        log.info(f"  → Match por telefono de descripcion: {ph} -> {contact.get('first_name','')} {contact.get('last_name','')}")
+                        break
+
+            # 4) match por nombre del titulo (best effort)
             if not contact:
                 client_name = extract_client_name(title)
                 if client_name:
@@ -407,13 +498,13 @@ def main():
             if not contact:
                 no_match += 1
 
-            # 3) crear/actualizar meeting (con o sin contacto)
+            # 5) crear/actualizar meeting (con o sin contacto)
             upsert_meeting(ev, contact, synced)
 
     save_synced(synced)
     log.info(
-        f"Resumen: {total_events} eventos | match email={matched_email} | "
-        f"match nombre={matched_name} | sin match={no_match}"
+        f"Resumen: {total_events} eventos | email={matched_email} | "
+        f"telefono={matched_phone} | nombre={matched_name} | sin match={no_match}"
     )
     return 0
 
