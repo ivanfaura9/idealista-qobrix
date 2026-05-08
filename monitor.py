@@ -26,6 +26,7 @@ import os
 import sys
 import socket
 import logging
+import urllib.parse
 from email.header import decode_header
 from datetime import datetime
 from html.parser import HTMLParser
@@ -425,7 +426,48 @@ def create_contact(name, email_addr, phone, description):
     return None
 
 
-def create_opportunity(contact_id, description, subject, portal="Idealista"):
+REF_RE = re.compile(
+    r"(?:ref(?:erencia)?|referencia|c[oó]digo)[:\s\.]+(\d{2,7})",
+    re.IGNORECASE,
+)
+
+
+def extract_property_ref(subject, body):
+    """Extrae el número de referencia de la propiedad del email.
+    Formatos típicos:
+      'con ref: 1093'
+      'Referencia 1093'
+      'ref. 1093'
+      'código 1093'
+    """
+    for source in (subject or "", body or ""):
+        m = REF_RE.search(source)
+        if m:
+            return m.group(1)
+    return None
+
+
+def find_property_by_ref(ref):
+    """Busca una propiedad en Qobrix por su campo 'ref'. Devuelve el id o None."""
+    if not ref:
+        return None
+    try:
+        params = {
+            "search": f'ref == "{ref}"',
+            "limit": "1",
+        }
+        url = f"{QOBRIX_BASE_URL}/properties?" + urllib.parse.urlencode(params, safe='="')
+        r = requests.get(url, headers=QOBRIX_HEADERS, timeout=30)
+        r.raise_for_status()
+        items = r.json().get("data", []) or []
+        if items:
+            return items[0].get("id")
+    except Exception as exc:
+        log.warning(f"  find_property_by_ref({ref}): {exc}")
+    return None
+
+
+def create_opportunity(contact_id, description, subject, portal="Idealista", property_id=None):
     payload = {
         "contact_name":       contact_id,
         "status":             "new",
@@ -435,6 +477,10 @@ def create_opportunity(contact_id, description, subject, portal="Idealista"):
         "description":        sanitize(description),
         "enquiry_date":       datetime.now().strftime("%Y-%m-%d"),
     }
+    # Vincular a la propiedad concreta si la encontramos
+    if property_id:
+        payload["properties"] = [property_id]
+
     # Asignar al owner (necesario para que Qobrix dispare la notif push
     # "te han asignado un nuevo lead" al usuario del CRM cuya app móvil escucha).
     owner_id = os.environ.get("OWNER_USER_ID", "").strip()
@@ -448,7 +494,8 @@ def create_opportunity(contact_id, description, subject, portal="Idealista"):
         )
         r.raise_for_status()
         oid = r.json().get("data", {}).get("id")
-        log.info(f"  Oportunidad creada: {subject[:60]}  [{oid}]")
+        link = f" [propiedad ✓]" if property_id else ""
+        log.info(f"  Oportunidad creada: {subject[:60]}  [{oid}]{link}")
         return oid
     except requests.HTTPError as exc:
         log.error(f"  Error oportunidad HTTP {exc.response.status_code}: {exc.response.text[:300]}")
@@ -697,7 +744,15 @@ def process_account(account, processed_dict):
                         )
 
                         if contact_id:
-                            opp_id = create_opportunity(contact_id, description, subject, portal)
+                            # Intentar localizar la propiedad por su referencia
+                            ref = extract_property_ref(subject, plain_text or html_body)
+                            property_id = find_property_by_ref(ref) if ref else None
+                            if ref and not property_id:
+                                log.info(f"  Ref {ref} no encontrada en Qobrix Properties")
+                            opp_id = create_opportunity(
+                                contact_id, description, subject, portal,
+                                property_id=property_id,
+                            )
                             # Notif push corporativa: PWA propia con logo IF Real Estate
                             notify_webpush(lead, subject, opp_id, portal)
                             processed.add(f"{folder}:{eid.decode()}")

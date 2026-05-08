@@ -1,0 +1,47 @@
+name: System watchdog (supervisor cada hora)
+
+on:
+  schedule:
+    - cron: "37 * * * *"   # cada hora a y 37 (offset para no saturar el :00)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run watchdog
+        env:
+          GITHUB_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
+          GMAIL_USER:            ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:    ${{ secrets.GMAIL_APP_PASSWORD }}
+          HOSTINGER_USER:        ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PASSWORD:    ${{ secrets.HOSTINGER_PASSWORD }}
+          QOBRIX_URL:            ${{ secrets.QOBRIX_URL }}
+          QOBRIX_USER:           ${{ secrets.QOBRIX_USER }}
+          QOBRIX_KEY:            ${{ secrets.QOBRIX_KEY }}
+          OWNER_USER_ID:         ${{ secrets.OWNER_USER_ID }}
+          GOOGLE_CLIENT_ID:      ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET:  ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN:  ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          VAPID_PRIVATE_KEY:     ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_EMAIL:           ${{ secrets.VAPID_EMAIL }}
+          WEBPUSH_SUBSCRIPTIONS: ${{ secrets.WEBPUSH_SUBSCRIPTIONS }}
+        run: python system_watchdog.py
