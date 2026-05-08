@@ -27,7 +27,7 @@ from email.header import decode_header
 import requests
 
 # Reusar lógica del monitor
-from monitor import _name_from_header, decode_str
+from monitor import _name_from_header, decode_str, parse_lead
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,11 +87,42 @@ def list_generic_contacts():
     return found
 
 
-def find_email_in_imap(host, user, pw, target_email):
-    """Busca en IMAP UN email de portal inmobiliario que mencione target_email.
-    LIMITAMOS la búsqueda a emails que vienen de Idealista/Fotocasa/Habitaclia/
-    Milanuncios para evitar falsos positivos de otros remitentes."""
-    if not target_email:
+def _extract_bodies(msg):
+    """Devuelve (text, html) del email."""
+    text_body, html_body = "", ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disp = str(part.get("Content-Disposition") or "")
+            if "attachment" in disp:
+                continue
+            try:
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    continue
+                charset = part.get_content_charset() or "utf-8"
+                content = payload.decode(charset, errors="ignore")
+                if ctype == "text/plain" and not text_body:
+                    text_body = content
+                elif ctype == "text/html" and not html_body:
+                    html_body = content
+            except Exception:
+                pass
+    else:
+        try:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                charset = msg.get_content_charset() or "utf-8"
+                text_body = payload.decode(charset, errors="ignore")
+        except Exception:
+            pass
+    return text_body, html_body
+
+
+def find_email_in_imap(host, user, pw, target_email, target_phone=None):
+    """Busca en IMAP UN email de portal inmobiliario que mencione el cliente.
+    Limita a emails de portales para evitar falsos positivos."""
+    if not target_email and not target_phone:
         return None
     PORTALS = ("idealista", "fotocasa", "habitaclia", "milanuncios")
     try:
@@ -99,12 +130,22 @@ def find_email_in_imap(host, user, pw, target_email):
         mail.login(user, pw)
         mail.select("INBOX")
         candidate_eid = None
-        # Probar uno por portal (es más fiable que un OR anidado)
-        for portal in PORTALS:
-            _, ids = mail.search(None, f'(FROM "{portal}" BODY "{target_email}")')
-            ids_list = ids[0].split() if ids and ids[0] else []
-            if ids_list:
-                candidate_eid = ids_list[-1]   # más reciente
+        search_terms = [target_email] if target_email else []
+        if target_phone:
+            digits = re.sub(r"\D", "", target_phone)
+            if len(digits) >= 9:
+                search_terms.append(digits[-9:])
+        for term in search_terms:
+            for portal in PORTALS:
+                try:
+                    _, ids = mail.search(None, f'(FROM "{portal}" BODY "{term}")')
+                except Exception:
+                    continue
+                ids_list = ids[0].split() if ids and ids[0] else []
+                if ids_list:
+                    candidate_eid = ids_list[-1]
+                    break
+            if candidate_eid is not None:
                 break
         if candidate_eid is None:
             mail.logout()
@@ -117,13 +158,19 @@ def find_email_in_imap(host, user, pw, target_email):
         from_hdr = decode_str(msg.get("From", ""))
         reply_to = decode_str(msg.get("Reply-To", ""))
         subject = decode_str(msg.get("Subject", ""))
+        text_body, html_body = _extract_bodies(msg)
         mail.logout()
-        # Validación extra: el FROM debe venir de un portal real
         if not any(p in from_hdr.lower() for p in PORTALS):
             return None
-        return {"from": from_hdr, "reply_to": reply_to, "subject": subject}
+        return {
+            "from": from_hdr,
+            "reply_to": reply_to,
+            "subject": subject,
+            "text": text_body,
+            "html": html_body,
+        }
     except Exception as exc:
-        log.warning(f"  IMAP search '{target_email}' en {host}: {exc}")
+        log.warning(f"  IMAP search en {host}: {exc}")
         return None
 
 
@@ -164,16 +211,17 @@ def main():
         first = c.get("first_name") or ""
         last = c.get("last_name") or ""
         email_addr = c.get("email") or c.get("email_2")
-        log.info(f"\n {first!r} {last!r} | email={email_addr} | id={c['id'][:8]}")
-        if not email_addr:
+        phone = c.get("phone") or c.get("phone_2")
+        log.info(f"\n {first!r} {last!r} | email={email_addr} | tel={phone} | id={c['id'][:8]}")
+        if not email_addr and not phone:
             no_match += 1
             continue
-        # Buscar en IMAP
+        # Buscar en IMAP por email o teléfono
         meta = None
         for host, user, pw in accounts:
             if not user or not pw:
                 continue
-            meta = find_email_in_imap(host, user, pw, email_addr)
+            meta = find_email_in_imap(host, user, pw, email_addr, phone)
             if meta:
                 break
         if not meta:
@@ -181,10 +229,21 @@ def main():
             no_match += 1
             continue
 
-        # Extraer nombre real del From / Reply-To
-        new_name = _name_from_header(meta["from"]) or _name_from_header(meta["reply_to"])
+        # Aplicar TODA la lógica de parse_lead (subject + HTML body bold + From + Reply-To)
+        try:
+            lead = parse_lead(
+                meta["subject"],
+                meta["text"],
+                meta["html"],
+                meta["reply_to"],
+                meta["from"],
+            )
+        except Exception as exc:
+            log.warning(f"   parse_lead error: {exc}")
+            lead = {}
+        new_name = (lead.get("name") or "").strip()
         if not new_name:
-            log.info(f"   no puedo extraer nombre real del From={meta['from'][:60]!r}")
+            log.info(f"   parse_lead no extrajo nombre del email original")
             no_match += 1
             continue
         # Split first / last
