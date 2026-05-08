@@ -1,0 +1,50 @@
+name: Retro-update nombres viejos (manual)
+
+# Workflow MANUAL para ejecutar retro_update_names.py
+# Solo se dispara desde la UI de GitHub Actions o gh workflow run
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no escribir nada, solo log)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  retro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run retro_update
+        env:
+          GMAIL_USER:            ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:    ${{ secrets.GMAIL_APP_PASSWORD }}
+          HOSTINGER_USER:        ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PASSWORD:    ${{ secrets.HOSTINGER_PASSWORD }}
+          QOBRIX_URL:            ${{ secrets.QOBRIX_URL }}
+          QOBRIX_USER:           ${{ secrets.QOBRIX_USER }}
+          QOBRIX_KEY:            ${{ secrets.QOBRIX_KEY }}
+          OWNER_USER_ID:         ${{ secrets.OWNER_USER_ID }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python retro_update_names.py --dry-run
+          else
+            python retro_update_names.py
+          fi
