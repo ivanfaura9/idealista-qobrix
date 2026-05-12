@@ -222,11 +222,7 @@ def check_google_token():
             return {"ok": True, "expires_days": None}
         days = rt_expires / 86400
         log.info(f"  expira en {days:.1f} días")
-        if days < 2:
-            send_push(
-                f"⚠️ El token de Google Calendar expira en {days:.1f} días. Hay que reautorizar pronto (ejecuta setup_new_agent.py).",
-                tag="watchdog-google-token",
-            )
+        # NO mandamos push - Iván lo ve en logs si quiere; aviso solo en resumen diario
         return {"ok": days >= 2, "expires_days": days}
     except Exception as exc:
         log.error(f"  fallo: {exc}")
@@ -259,12 +255,10 @@ def check_pending_imap_leads():
         except Exception as exc:
             log.error(f"  IMAP {host}: {exc}")
     log.info(f"  emails portales sin leer: {pending}")
-    if pending > 5:
-        send_push(
-            f"📧 {pending} emails de portales sin procesar (puede que el monitor esté atascado).",
-            tag="watchdog-pending",
-        )
-    return {"ok": pending <= 5, "pending": pending}
+    # NOTA: 'sin leer' (UNSEEN) NO significa 'sin procesar'. Mi monitor.py procesa
+    # los emails pero NO los marca como leídos en IMAP - solo guarda el ID en
+    # processed_ids.json. Por tanto este contador era spam. Solo log, no push.
+    return {"ok": True, "pending": pending}
 
 
 # ──────────────────────────────────────────────
