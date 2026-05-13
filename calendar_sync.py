@@ -331,6 +331,120 @@ def search_contact_by_name(name):
 
 
 # ──────────────────────────────────────────────
+# Extraccion de pistas de PROPIEDAD desde el titulo
+# ──────────────────────────────────────────────
+PROPERTY_NOISE = {
+    "visita","piso","casa","atico","ático","duplex","dúplex","local","oficina",
+    "venta","alquiler","vendido","con","sobre","de","del","en","el","la","los","las",
+    "y","e","ref","referencia","2","3","captacion","captación","valoracion","valoración",
+    "llamada","reunion","reunión","firma","tour","tour:","cita",
+}
+
+
+def extract_property_hint(title):
+    """Devuelve (ref, street_keyword) extraídos del título del evento.
+    - ref: número 2-7 dígitos si aparece 'ref XXX' / 'referencia XXX'
+    - street_keyword: la palabra significativa (ej. 'Pallaresa', 'Bassegoda')
+      que viene entre 'piso ...' y 'con NOMBRE' (o final).
+    """
+    if not title:
+        return None, None
+    s = clean_emojis(title)
+    s = re.sub(r"^\d+[\s\.\-]*", "", s)  # "2 visita ..." -> "visita ..."
+
+    ref = None
+    m = re.search(r"\b(?:ref(?:erencia)?|c[oó]digo)[:\s\.]+(\d{2,7})", s, re.I)
+    if m:
+        ref = m.group(1)
+
+    # Trozo entre "piso/casa/...." y "con NOMBRE" / fin
+    street_kw = None
+    m = re.search(
+        r"(?:piso|casa|atico|ático|duplex|d[úu]plex|local|oficina|chalet|loft)\b"
+        r"(?:\s+(?:venta|alquiler|de\s+venta|de\s+alquiler|en\s+venta|en\s+alquiler))?\s+"
+        r"(.+?)(?:\s+con\s+|\s+ref\b|$)",
+        s,
+        re.I,
+    )
+    if m:
+        chunk = m.group(1).strip()
+        # Filtrar palabras "ruido"
+        tokens = [t for t in re.split(r"[\s,]+", chunk) if t]
+        clean = []
+        for t in tokens:
+            tl = t.lower().strip(".:")
+            if tl in PROPERTY_NOISE: continue
+            if tl.isdigit(): continue
+            clean.append(t)
+        if clean:
+            # Tomar la PRIMERA palabra significativa (suele ser la calle)
+            street_kw = clean[0].strip(".,:;")
+            # Si tiene <3 caracteres ignorar
+            if len(street_kw) < 3:
+                street_kw = None
+
+    return ref, street_kw
+
+
+def find_property_by_hint(ref, street_kw):
+    """Busca property en Qobrix por ref (primero) o por street (después).
+    Si hay 1 sola coincidencia, devuelve su id. Si hay varias o ninguna, None."""
+    # 1) Por ref (más fiable)
+    if ref:
+        try:
+            url = QOBRIX_API + "/properties?" + urllib.parse.urlencode(
+                {"search": f'ref == "{ref}"', "limit": "2"}, safe='="')
+            r = requests.get(url, headers=QOBRIX_HEADERS, timeout=30)
+            r.raise_for_status()
+            items = r.json().get("data", []) or []
+            if len(items) >= 1:
+                return items[0]["id"], items[0].get("street","")
+        except Exception as exc:
+            log.warning(f"  find_property by ref={ref}: {exc}")
+
+    # 2) Por street contains keyword
+    if street_kw:
+        try:
+            url = QOBRIX_API + "/properties?" + urllib.parse.urlencode(
+                {"search": f'street contains "{street_kw}"', "limit": "5"}, safe='="')
+            r = requests.get(url, headers=QOBRIX_HEADERS, timeout=30)
+            r.raise_for_status()
+            items = r.json().get("data", []) or []
+            if len(items) == 1:
+                return items[0]["id"], items[0].get("street","")
+            if len(items) > 1:
+                log.info(f"  Property hint '{street_kw}': {len(items)} matches, omito link")
+        except Exception as exc:
+            log.warning(f"  find_property by street={street_kw}: {exc}")
+
+    return None, None
+
+
+def find_opportunity_for(contact_id, property_id):
+    """Devuelve el id de una Opportunity que vincule este contacto a esta propiedad
+    (vía el campo many-to-many 'properties'). Si no encuentra, None."""
+    if not contact_id or not property_id:
+        return None
+    try:
+        url = QOBRIX_API + "/opportunities?" + urllib.parse.urlencode(
+            {"search": f'contact_name == "{contact_id}"', "limit": "20",
+             "include[]": "Properties"}, safe='="')
+        r = requests.get(url, headers=QOBRIX_HEADERS, timeout=30)
+        r.raise_for_status()
+        items = r.json().get("data", []) or []
+        for o in items:
+            props = o.get("properties") or []
+            if isinstance(props, list):
+                for p in props:
+                    pid = p.get("id") if isinstance(p, dict) else p
+                    if pid == property_id:
+                        return o["id"]
+    except Exception as exc:
+        log.warning(f"  find_opportunity_for: {exc}")
+    return None
+
+
+# ──────────────────────────────────────────────
 # Upsert Meeting Qobrix
 # ──────────────────────────────────────────────
 def upsert_meeting(event, contact, synced):
@@ -355,12 +469,29 @@ def upsert_meeting(event, contact, synced):
     summary = event.get("summary", "(sin titulo)")
     location = event.get("location", "")
     base_desc = event.get("description", "") or ""
+
+    # NUEVO: detectar propiedad por título y, si hay opp con esa property + contacto,
+    # vincular Meeting -> Opportunity (Qobrix Meeting no tiene campo property directo)
+    prop_id, prop_street = (None, None)
+    opp_id = None
+    try:
+        ref_hint, street_kw = extract_property_hint(summary)
+        if ref_hint or street_kw:
+            prop_id, prop_street = find_property_by_hint(ref_hint, street_kw)
+            if prop_id and contact_id:
+                opp_id = find_opportunity_for(contact_id, prop_id)
+    except Exception as exc:
+        log.warning(f"  prop hint err: {exc}")
+
     description = f"{summary}\n\n{base_desc}".strip() if base_desc else summary
+    if prop_id:
+        prop_line = f"\n\n📍 Propiedad: {prop_street or ''}".rstrip()
+        description = (description + prop_line).strip()
     description = (description + "\n\n[Auto-sync Google Calendar]").strip()
 
     payload = {
         "description": description[:1000],
-        "location": location[:200],
+        "location": (location or prop_street or "")[:200],
         "start_date": start,
         "end_date": end,
     }
@@ -375,22 +506,30 @@ def upsert_meeting(event, contact, synced):
                 existing = qobrix_get(f"/meetings/{qobrix_id}")
                 existing_data = existing.get("data") or existing
                 already_linked = bool(existing_data.get("contact"))
+                already_opp = bool(existing_data.get("related_opportunity"))
             except Exception:
                 already_linked = False
+                already_opp = False
             if contact_id and not already_linked:
                 payload["contact"] = contact_id
+            if opp_id and not already_opp:
+                payload["related_opportunity"] = opp_id
             qobrix_patch(f"/meetings/{qobrix_id}", payload)
             link = "(preservado)" if already_linked else ("✓ contacto" if contact_id else "✗ sin contacto")
-            log.info(f"  ↻ Meeting actualizada: {summary[:50]} ({fmt_time(start)}) [{link}]")
+            prop_tag = " ✓ opp" if opp_id else (" 📍 prop" if prop_id else "")
+            log.info(f"  ↻ Meeting actualizada: {summary[:50]} ({fmt_time(start)}) [{link}{prop_tag}]")
         else:
             if contact_id:
                 payload["contact"] = contact_id
+            if opp_id:
+                payload["related_opportunity"] = opp_id
             r = qobrix_post("/meetings", payload)
             new_id = (r.get("data") or {}).get("id") or r.get("id")
             if new_id:
                 synced[event_id] = new_id
                 link = "✓ contacto" if contact_id else "✗ sin contacto"
-                log.info(f"  ✚ Meeting creada: {summary[:50]} ({fmt_time(start)}) [{link}]")
+                prop_tag = " ✓ opp" if opp_id else (" 📍 prop" if prop_id else "")
+                log.info(f"  ✚ Meeting creada: {summary[:50]} ({fmt_time(start)}) [{link}{prop_tag}]")
             else:
                 log.warning(f"  Meeting POST sin id en respuesta: {r}")
     except Exception as exc:
